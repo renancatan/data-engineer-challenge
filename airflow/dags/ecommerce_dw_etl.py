@@ -325,7 +325,15 @@ def load_fact_sales_item() -> None:
     except Exception as e:
         print(f"Skipping MV refresh: {e}")
 
-            
+def ge_basic_checks():
+    import os, subprocess
+    env = os.environ.copy()
+    env["DW_DB_URL"] = os.getenv(
+        "DW_DB_URL",
+        "postgresql+psycopg2://postgres:postgres@data_warehouse:5432/data_warehouse"
+    )
+    subprocess.check_call(["python", "/opt/airflow/analytics/run_dq_checks.py"], env=env)
+       
 default_args = {
     "owner": "data-eng",
     "depends_on_past": False,
@@ -364,5 +372,9 @@ with DAG(
         task_id="load_fact_sales_item",
         python_callable=load_fact_sales_item,
     )
+    t_ge = PythonOperator(
+        task_id="ge_basic_checks",
+        python_callable=ge_basic_checks,
+    )
 
-    t_create_dw >> [t_dim_customer, t_dim_product] >> t_fetch_fx >> t_load_fact
+    t_create_dw >> [t_dim_customer, t_dim_product] >> t_fetch_fx >> t_load_fact >> t_ge

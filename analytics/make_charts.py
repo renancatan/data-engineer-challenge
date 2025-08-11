@@ -1,67 +1,3 @@
-# import os
-# import pandas as pd
-# from sqlalchemy import create_engine
-# import matplotlib.pyplot as plt
-
-# DW_URL = os.getenv(
-#     "DW_DB_URL",
-#     "postgresql+psycopg2://postgres:postgres@localhost:5434/data_warehouse"
-# )
-
-# eng = create_engine(DW_URL, pool_pre_ping=True)
-
-# # Revenue by hour
-# q_hour = """
-# WITH params AS (
-#   SELECT DATE '2024-01-01' AS start_date, DATE '2024-12-31' AS end_date
-# )
-# SELECT FLOOR(s.time_key / 60.0)::int AS hour_of_day,
-#        SUM(s.line_amount_usd) AS revenue,
-#        SUM(s.quantity)        AS units
-# FROM dw.vw_sales_clean s
-# CROSS JOIN params p
-# WHERE to_date(s.date_key::text,'YYYYMMDD') BETWEEN p.start_date AND p.end_date
-# GROUP BY hour_of_day
-# ORDER BY hour_of_day;
-# """
-# df_hour = pd.read_sql(q_hour, eng)
-
-# plt.figure()
-# plt.bar(df_hour["hour_of_day"], df_hour["revenue"])
-# plt.title("Revenue by Hour (USD)")
-# plt.xlabel("Hour of Day")
-# plt.ylabel("Revenue")
-# plt.tight_layout()
-# os.makedirs("analytics/figures", exist_ok=True)
-# plt.savefig("analytics/figures/revenue_by_hour.png", dpi=160)
-
-# # Revenue by category
-# q_cat = """
-# WITH params AS (
-#   SELECT DATE '2024-01-01' AS start_date, DATE '2024-12-31' AS end_date
-# )
-# SELECT s.product_category, SUM(s.line_amount_usd) AS revenue
-# FROM dw.vw_sales_clean s
-# CROSS JOIN params p
-# WHERE to_date(s.date_key::text,'YYYYMMDD') BETWEEN p.start_date AND p.end_date
-# GROUP BY s.product_category
-# ORDER BY revenue DESC;
-# """
-# df_cat = pd.read_sql(q_cat, eng)
-
-# plt.figure()
-# plt.bar(df_cat["product_category"], df_cat["revenue"])
-# plt.title("Revenue by Category (USD)")
-# plt.xlabel("Category")
-# plt.ylabel("Revenue")
-# plt.xticks(rotation=30, ha="right")
-# plt.tight_layout()
-# plt.savefig("analytics/figures/revenue_by_category.png", dpi=160)
-# print("Charts saved under analytics/figures/")
-
-
-
-
 # analytics/make_charts.py
 # Runs end-to-end:
 # 1) (Re)creates DW views (base/enriched/clean)
@@ -69,10 +5,12 @@
 # 3) Saves charts & CSVs under analytics/figures/
 #
 # Requires: pandas, matplotlib, SQLAlchemy, psycopg2-binary
+# Python 3.8 compatible (no PEP 604 | unions)
 
 import os
+import shutil
 from pathlib import Path
-from datetime import date
+from typing import Optional, Dict, List
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -92,10 +30,14 @@ END_DATE   = os.getenv("AN_END_DATE",   "2024-12-31")
 
 OUT_DIR = Path(os.getenv("AN_OUT_DIR", "/opt/airflow/analytics/figures")).resolve()
 
-ENGINE_URL = f"postgresql+psycopg2://{PG_USER}:{PG_PASS}@{PG_HOST}:{PG_PORT}/{PG_DB}"
+ENGINE_URL = "postgresql+psycopg2://{u}:{p}@{h}:{o}/{d}".format(
+    u=PG_USER, p=PG_PASS, h=PG_HOST, o=PG_PORT, d=PG_DB
+)
 eng = create_engine(ENGINE_URL, pool_pre_ping=True)
 
-# Make output dir
+# Fresh output dir each run
+if OUT_DIR.exists():
+    shutil.rmtree(OUT_DIR)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # -----------------------
@@ -134,9 +76,9 @@ FROM dw.vw_sales_enriched
 WHERE is_non_iso_currency = FALSE;
 """
 
-Q_REVENUE_BY_CATEGORY = f"""
+Q_REVENUE_BY_CATEGORY = """
 WITH params AS (
-  SELECT DATE '{START_DATE}' AS start_date, DATE '{END_DATE}' AS end_date
+  SELECT DATE %(start)s AS start_date, DATE %(end)s AS end_date
 )
 SELECT
   s.product_category,
@@ -149,9 +91,9 @@ GROUP BY s.product_category
 ORDER BY revenue DESC;
 """
 
-Q_REVENUE_BY_HOUR = f"""
+Q_REVENUE_BY_HOUR = """
 WITH params AS (
-  SELECT DATE '{START_DATE}' AS start_date, DATE '{END_DATE}' AS end_date
+  SELECT DATE %(start)s AS start_date, DATE %(end)s AS end_date
 )
 SELECT
   FLOOR(s.time_key / 60.0)::int AS hour_of_day,
@@ -164,9 +106,9 @@ GROUP BY hour_of_day
 ORDER BY hour_of_day;
 """
 
-Q_DAILY_TREND = f"""
+Q_DAILY_TREND = """
 WITH params AS (
-  SELECT DATE '{START_DATE}' AS start_date, DATE '{END_DATE}' AS end_date
+  SELECT DATE %(start)s AS start_date, DATE %(end)s AS end_date
 ),
 daily AS (
   SELECT
@@ -180,9 +122,9 @@ daily AS (
 SELECT * FROM daily ORDER BY sales_date;
 """
 
-Q_WEEKDAY_HOUR = f"""
+Q_WEEKDAY_HOUR = """
 WITH params AS (
-  SELECT DATE '{START_DATE}' AS start_date, DATE '{END_DATE}' AS end_date
+  SELECT DATE %(start)s AS start_date, DATE %(end)s AS end_date
 )
 SELECT
   EXTRACT(ISODOW FROM to_date(s.date_key::text,'YYYYMMDD'))::int AS weekday_iso, -- 1=Mon..7=Sun
@@ -195,15 +137,15 @@ GROUP BY weekday_iso, hour_of_day
 ORDER BY weekday_iso, hour_of_day;
 """
 
-Q_TOP_CUSTOMERS = f"""
+Q_TOP_CUSTOMERS = """
 WITH params AS (
-  SELECT DATE '{START_DATE}' AS start_date, DATE '{END_DATE}' AS end_date
+  SELECT DATE %(start)s AS start_date, DATE %(end)s AS end_date
 )
 SELECT
-  COALESCE(c.full_name, 'Unknown') AS customer_name,
-  COALESCE(c.country, 'Unknown')   AS country,
-  COUNT(DISTINCT s.order_id)       AS orders,
-  SUM(s.line_amount_usd)           AS revenue
+  COALESCE(NULLIF(TRIM(c.full_name), ''), 'Unknown') AS customer_name,
+  COALESCE(NULLIF(TRIM(c.country), ''), 'Unknown')   AS country,
+  COUNT(DISTINCT s.order_id)                         AS orders,
+  SUM(s.line_amount_usd)                             AS revenue
 FROM dw.vw_sales_clean s
 LEFT JOIN dw.dim_customer c ON c.customer_id = s.customer_id
 CROSS JOIN params p
@@ -213,9 +155,9 @@ ORDER BY revenue DESC
 LIMIT 10;
 """
 
-Q_MOM_BY_CATEGORY = f"""
+Q_MOM_BY_CATEGORY = """
 WITH params AS (
-  SELECT DATE '{START_DATE}' AS start_date, DATE '{END_DATE}' AS end_date
+  SELECT DATE %(start)s AS start_date, DATE %(end)s AS end_date
 ),
 by_month AS (
   SELECT
@@ -232,9 +174,9 @@ FROM by_month
 ORDER BY product_category, month;
 """
 
-Q_FX_COVERAGE = f"""
+Q_FX_COVERAGE = """
 WITH params AS (
-  SELECT DATE '{START_DATE}' AS start_date, DATE '{END_DATE}' AS end_date
+  SELECT DATE %(start)s AS start_date, DATE %(end)s AS end_date
 )
 SELECT
   COUNT(*)                               AS lines_total,
@@ -244,10 +186,34 @@ CROSS JOIN params p
 WHERE to_date(s.date_key::text,'YYYYMMDD') BETWEEN p.start_date AND p.end_date;
 """
 
-def run_df(sql: str) -> pd.DataFrame:
-    return pd.read_sql(sql, eng)
+Q_AVG_REVENUE_PER_ORDER_BY_COUNTRY = """
+WITH params AS (
+  SELECT DATE %(start)s AS start_date, DATE %(end)s AS end_date
+),
+base AS (
+  SELECT
+    s.order_id,
+    COALESCE(NULLIF(TRIM(c.country), ''), 'Unknown') AS country,
+    SUM(s.line_amount_usd)                            AS order_revenue
+  FROM dw.vw_sales_clean s
+  LEFT JOIN dw.dim_customer c ON c.customer_id = s.customer_id
+  CROSS JOIN params p
+  WHERE to_date(s.date_key::text,'YYYYMMDD') BETWEEN p.start_date AND p.end_date
+  GROUP BY s.order_id, country
+)
+SELECT country, AVG(order_revenue) AS avg_order_value
+FROM base
+GROUP BY country
+ORDER BY avg_order_value DESC;
+"""
 
-def ensure_views():
+# -----------------------
+# Helpers
+# -----------------------
+def run_df(sql: str, params: Optional[Dict] = None) -> pd.DataFrame:
+    return pd.read_sql(sql, eng, params=params or {"start": START_DATE, "end": END_DATE})
+
+def ensure_views() -> None:
     with eng.begin() as conn:
         for stmt in VIEWS_SQL.split(";"):
             s = stmt.strip()
@@ -255,12 +221,12 @@ def ensure_views():
                 continue
             conn.execute(text(s + ";"))
 
-def save_csv(df: pd.DataFrame, name: str):
+def save_csv(df: pd.DataFrame, name: str) -> Path:
     p = OUT_DIR / f"{name}.csv"
     df.to_csv(p, index=False)
     return p
 
-def fig_save(name: str):
+def fig_save(name: str) -> Path:
     p = OUT_DIR / f"{name}.png"
     plt.tight_layout()
     plt.savefig(p, dpi=130, bbox_inches="tight")
@@ -270,27 +236,31 @@ def fig_save(name: str):
 # -----------------------
 # Charts
 # -----------------------
-def chart_revenue_by_category():
+def chart_revenue_by_category() -> Optional[Path]:
     df = run_df(Q_REVENUE_BY_CATEGORY)
     save_csv(df, "revenue_by_category")
+    if df.empty:
+        return None
     plt.figure()
     plt.bar(df["product_category"], df["revenue"])
     plt.xticks(rotation=30, ha="right")
     plt.ylabel("Revenue (USD)")
-    plt.title(f"Revenue by Category ({START_DATE} .. {END_DATE})")
+    plt.title("Revenue by Category ({s} .. {e})".format(s=START_DATE, e=END_DATE))
     return fig_save("revenue_by_category")
 
-def chart_revenue_by_hour():
+def chart_revenue_by_hour() -> Optional[Path]:
     df = run_df(Q_REVENUE_BY_HOUR)
     save_csv(df, "revenue_by_hour")
+    if df.empty:
+        return None
     plt.figure()
     plt.bar(df["hour_of_day"], df["revenue"])
     plt.xlabel("Hour of Day")
     plt.ylabel("Revenue (USD)")
-    plt.title(f"Revenue by Hour ({START_DATE} .. {END_DATE})")
+    plt.title("Revenue by Hour ({s} .. {e})".format(s=START_DATE, e=END_DATE))
     return fig_save("revenue_by_hour")
 
-def chart_daily_trend_ma():
+def chart_daily_trend_ma() -> Optional[Path]:
     df = run_df(Q_DAILY_TREND)
     if df.empty:
         return None
@@ -301,58 +271,73 @@ def chart_daily_trend_ma():
     plt.plot(df["sales_date"], df["revenue_7d_ma"], label="7-day MA")
     plt.legend()
     plt.ylabel("Revenue (USD)")
-    plt.title(f"Daily Revenue & 7-day MA ({START_DATE} .. {END_DATE})")
+    plt.title("Daily Revenue & 7-day MA ({s} .. {e})".format(s=START_DATE, e=END_DATE))
     return fig_save("daily_revenue_7dma")
 
-def chart_weekday_hour_heatmap():
+def chart_daily_cumulative() -> Optional[Path]:
+    df = run_df(Q_DAILY_TREND)
+    if df.empty:
+        return None
+    df["cumulative_revenue"] = df["revenue"].cumsum()
+    save_csv(df[["sales_date","cumulative_revenue"]], "daily_revenue_cumulative")
+    plt.figure()
+    plt.plot(df["sales_date"], df["cumulative_revenue"])
+    plt.ylabel("Cumulative Revenue (USD)")
+    plt.title("Cumulative Revenue ({s} .. {e})".format(s=START_DATE, e=END_DATE))
+    return fig_save("daily_revenue_cumulative")
+
+def chart_weekday_hour_heatmap() -> Optional[Path]:
     df = run_df(Q_WEEKDAY_HOUR)
     if df.empty:
         return None
     pivot = df.pivot_table(index="weekday_iso", columns="hour_of_day", values="revenue", aggfunc="sum").fillna(0.0)
-    # Ensure full grid 1..7 x 0..23
     pivot = pivot.reindex(index=[1,2,3,4,5,6,7], columns=list(range(24)), fill_value=0.0)
-
     plt.figure()
     im = plt.imshow(pivot.values, aspect="auto", origin="upper")
     plt.colorbar(im, label="Revenue (USD)")
     plt.yticks(range(7), ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"])
     plt.xticks(range(0,24,2))
     plt.xlabel("Hour of Day")
-    plt.title(f"Revenue Heatmap (Weekday × Hour) {START_DATE} .. {END_DATE}")
+    plt.title("Revenue Heatmap (Weekday × Hour) {s} .. {e}".format(s=START_DATE, e=END_DATE))
     return fig_save("heatmap_weekday_hour")
 
-def chart_top_customers():
+def _clean_label_series(name_ser: pd.Series, country_ser: pd.Series) -> List[str]:
+    name = name_ser.fillna("Unknown").astype(str).str.strip()
+    # squash any "~unknown ..." or "unknown..." to a clean token
+    name = name.str.replace(r"^\s*~?\s*unknown.*$", "Unknown Customer", regex=True, case=False)
+    country = country_ser.fillna("Unknown").astype(str).str.strip().str.title()
+    return (name + " — " + country).tolist()
+
+def chart_top_customers() -> Optional[Path]:
     df = run_df(Q_TOP_CUSTOMERS)
     save_csv(df, "top_customers")
     if df.empty:
         return None
-    labels = (df["customer_name"] + " (" + df["country"] + ")").tolist()
+    labels = _clean_label_series(df["customer_name"], df["country"])
     plt.figure()
     plt.barh(labels[::-1], df["revenue"][::-1])
     plt.xlabel("Revenue (USD)")
-    plt.title(f"Top 10 Customers by Revenue ({START_DATE} .. {END_DATE})")
+    plt.title("Top 10 Customers by Revenue ({s} .. {e})".format(s=START_DATE, e=END_DATE))
     return fig_save("top_customers")
 
-def chart_mom_by_category():
+def chart_monthly_revenue_by_category_bars() -> Optional[Path]:
+    # grouped bars for top 5 categories across months (easier than lines)
     df = run_df(Q_MOM_BY_CATEGORY)
     if df.empty:
         return None
-    # Pick top 5 categories by total revenue to avoid spaghetti chart
-    top5 = (df.groupby("product_category")["revenue"]
-              .sum()
-              .sort_values(ascending=False)
-              .head(5)
-              .index.tolist())
-    plt.figure()
-    for cat in top5:
-        sub = df[df["product_category"] == cat]
-        plt.plot(sub["month"], sub["revenue"], label=cat)
-    plt.legend()
-    plt.ylabel("Revenue (USD)")
-    plt.title(f"Monthly Revenue by Category — top 5 ({START_DATE} .. {END_DATE})")
-    return fig_save("mom_by_category_top5")
+    totals = df.groupby("product_category")["revenue"].sum().sort_values(ascending=False)
+    top5 = totals.head(5).index.tolist()
+    sub = df[df["product_category"].isin(top5)].copy()
+    piv = sub.pivot_table(index="month", columns="product_category", values="revenue", aggfunc="sum").fillna(0.0)
+    piv = piv.sort_index()
+    save_csv(piv.reset_index(), "mom_by_category_top5_bars")
+    ax = piv.plot(kind="bar", figsize=(10,5))
+    ax.set_ylabel("Revenue (USD)")
+    ax.set_title("Monthly Revenue by Category — Top 5 ({s} .. {e})".format(s=START_DATE, e=END_DATE))
+    plt.xticks(rotation=30, ha="right")
+    return fig_save("mom_by_category_top5_bars")
 
-def chart_fx_coverage():
+def chart_fx_coverage() -> Optional[Path]:
     df = run_df(Q_FX_COVERAGE)
     if df.empty:
         return None
@@ -362,27 +347,42 @@ def chart_fx_coverage():
     plt.figure()
     plt.bar(["With FX rate","Fallback"], [ok, fbk])
     plt.ylabel("Rows")
-    plt.title(f"FX Coverage ({START_DATE} .. {END_DATE}) — total rows: {total}")
+    plt.title("FX Coverage ({s} .. {e}) — total rows: {t}".format(s=START_DATE, e=END_DATE, t=total))
     return fig_save("fx_coverage")
+
+def chart_avg_revenue_per_order_by_country() -> Optional[Path]:
+    df = run_df(Q_AVG_REVENUE_PER_ORDER_BY_COUNTRY)
+    save_csv(df, "avg_order_value_by_country")
+    if df.empty:
+        return None
+    plt.figure()
+    plt.bar(df["country"], df["avg_order_value"])
+    plt.xticks(rotation=30, ha="right")
+    plt.ylabel("Avg Revenue per Order (USD)")
+    plt.title("Avg Revenue per Order by Country ({s} .. {e})".format(s=START_DATE, e=END_DATE))
+    return fig_save("avg_order_value_by_country")
 
 # -----------------------
 # Main
 # -----------------------
-def main():
-    print(f"Connecting: {ENGINE_URL}")
+def main() -> None:
+    print("Connecting:", ENGINE_URL)
     ensure_views()
     print("Views ensured.")
 
-    outputs = []
-    outputs.append(chart_revenue_by_category())
-    outputs.append(chart_revenue_by_hour())
-    outputs.append(chart_daily_trend_ma())
-    outputs.append(chart_weekday_hour_heatmap())
-    outputs.append(chart_top_customers())
-    outputs.append(chart_mom_by_category())
-    outputs.append(chart_fx_coverage())
-
+    outputs = [
+        chart_revenue_by_category(),
+        chart_revenue_by_hour(),
+        chart_daily_trend_ma(),
+        chart_daily_cumulative(),                      # NEW
+        chart_weekday_hour_heatmap(),
+        chart_top_customers(),
+        chart_monthly_revenue_by_category_bars(),      # CHANGED to bars
+        chart_fx_coverage(),
+        chart_avg_revenue_per_order_by_country(),      # NEW
+    ]
     outputs = [p for p in outputs if p]
+
     print("CSV & charts written:")
     for p in sorted(OUT_DIR.glob("*.csv")):
         print(" -", p)

@@ -247,13 +247,29 @@ docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/
 # 4) Run analytics
 docker exec -i data_warehouse psql -U postgres -d data_warehouse < analytics/queries.sql
 
-# 5) Run tests
-docker exec -it airflow_scheduler bash -lc 'PYTHONPATH=/opt/airflow/dags ~/.local/bin/pytest -q /opt/airflow/tests'
-
-
-# 6) Generate visuals:
+# 4b) Run dashboard and Generate visuals:
+docker exec -it airflow_scheduler rm -rf /opt/airflow/analytics/figures
+docker cp analytics/make_charts.py airflow_scheduler:/opt/airflow/analytics/make_charts.py
+docker exec -it airflow_scheduler bash -lc 'python /opt/airflow/analytics/make_charts.py'
+rm -rf analytics/figures
 docker cp airflow_scheduler:/opt/airflow/analytics/figures ./analytics/figures
+ls -1 analytics/figures
 
+
+# 5) Run tests
+docker exec -it airflow_scheduler bash -lc 'mkdir -p /opt/airflow/tests'
+docker cp tests/. airflow_scheduler:/opt/airflow/tests
+docker exec -it airflow_scheduler bash -lc '
+  python -m pip install --user -q pytest pytest-cov &&
+  export PATH=$HOME/.local/bin:$PATH &&
+  PYTHONPATH=/opt/airflow/dags pytest -q /opt/airflow/tests'
+
+
+# 6) Run quality checks
+docker cp analytics/run_dq_checks.py airflow_scheduler:/opt/airflow/analytics/run_dq_checks.py
+docker exec -it airflow_scheduler airflow tasks test \
+  --subdir /opt/airflow/dags/ecommerce_dw_etl.py \
+  ecommerce_dw_etl ge_basic_checks 2025-08-09
 
 flowchart LR
   subgraph Sources
