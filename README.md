@@ -205,3 +205,96 @@ This is a 5-hour challenge. Suggested time allocation:
 - **30 minutes**: Documentation and dashboard mockup
 
 Good luck with your data engineering challenge! 🚀
+
+
+# How to run
+
+- docker compose up -d
+
+- airflow tasks test … create_dw_schema then dims/fx/fact (or trigger DAG from UI).
+
+- psql examples to run queries.
+
+- “Troubleshooting” bullets you already used: env checks, getent hosts, and psql from scheduler.
+
+
+flowchart LR
+  subgraph Sources
+    A[(Postgres: ecommerce_db1\ncustomers/orders/order_items)]
+    B[(Postgres: ecommerce_db2\nproduct_descriptions)]
+  end
+  A -->|extract| D{{Airflow DAG}}
+  B -->|extract| D
+  D -->|transform + FX| C[(Postgres: data_warehouse\nDW schema)]
+  C -->|views| E[BI / Queries\n(vw_sales_base / enriched / clean)]
+
+
+
+# Quick check-list:
+
+# 1) Up containers
+docker compose up -d
+
+# 2) (Re)create schema + views + indexes
+docker exec -i data_warehouse psql -U postgres -d data_warehouse < database/dw_schema.sql
+
+# 3) Run DAG tasks once
+docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl create_dw_schema 2025-08-09
+docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl upsert_dim_product 2025-08-09
+docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl fetch_daily_fx_rates 2025-08-09
+docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl load_fact_sales_item 2025-08-09
+
+# 4) Run analytics
+docker exec -i data_warehouse psql -U postgres -d data_warehouse < analytics/queries.sql
+
+# 5) Run tests
+docker exec -it airflow_scheduler bash -lc 'PYTHONPATH=/opt/airflow/dags ~/.local/bin/pytest -q /opt/airflow/tests'
+
+
+# 6) Generate visuals:
+docker cp airflow_scheduler:/opt/airflow/analytics/figures ./analytics/figures
+
+
+flowchart LR
+  subgraph Sources
+    A[(Postgres: ecommerce_db1\ncustomers/orders/order_items)]
+    B[(Postgres: ecommerce_db2\nproduct_descriptions)]
+  end
+
+  subgraph Airflow
+    D[ecommerce_dw_etl DAG\n(create_dw_schema → dims → fx → fact)]
+  end
+
+  subgraph DW[Postgres: data_warehouse]
+    E[(dw.dim_customer)]
+    F[(dw.dim_product)]
+    G[(dw.dim_date)]
+    H[(dw.dim_time)]
+    I[(dw.dim_fx_rate)]
+    J[(dw.fact_sales_item)]
+    K[(dw.mv_hourly_sales)]
+    L[[dw.vw_sales_base]]
+    M[[dw.vw_sales_enriched]]
+    N[[dw.vw_sales_clean]]
+  end
+
+  A -->|orders & items| D
+  B -->|product catalog| D
+  D -->|upserts| E & F & I & J
+  D -->|seeds| G & H
+  J --> K
+  J --> L --> M --> N
+
+  N -->|SQL queries| O[[Analytics/Reports]]
+
+
+  ---
+# 1) Clean any old local copies
+rm -rf analytics/figures
+mkdir -p analytics
+
+# 2) Copy the whole figures folder out of the container into ./analytics
+docker cp airflow_scheduler:/opt/airflow/analytics/figures ./analytics
+
+# 3) Sanity check
+ls -1 analytics/figures

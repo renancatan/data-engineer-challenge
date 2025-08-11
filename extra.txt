@@ -1,0 +1,62 @@
+# Inspect current lines (optional)
+grep -n 'ORDERS_URL\|PRODUCTS_URL\|DW_URL' airflow/dags/ecommerce_dw_etl.py
+
+# Fix products DW URLs (5433 -> 5432, 5434 -> 5432)
+sed -i 's@ecommerce_db2:5433@ecommerce_db2:5432@g' airflow/dags/ecommerce_dw_etl.py
+sed -i 's@data_warehouse:5434@data_warehouse:5432@g' airflow/dags/ecommerce_dw_etl.py
+
+# Re-check
+grep -n 'ORDERS_URL\|PRODUCTS_URL\|DW_URL' airflow/dags/ecommerce_dw_etl.py
+
+
+# debug
+docker exec -it airflow_scheduler bash -lc 'ls -l /opt/airflow/dags/ecommerce_dw_etl.py'
+docker exec -it airflow_scheduler bash -lc 'grep -n "dag_id=.*ecommerce_dw_etl" /opt/airflow/dags/ecommerce_dw_etl.py || sed -n "1,260p" /opt/airflow/dags/ecommerce_dw_etl.py | nl | sed -n "180,260p"'
+
+# restart scheduler and run dag
+docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl load_fact_sales_item 2025-08-09
+docker exec -it data_warehouse psql -U postgres -d data_warehouse -c "SELECT COUNT(*) FROM dw.fact_sales_item;"
+
+
+
+docker cp ./ecommerce_dw_etl.py airflow_scheduler:/opt/airflow/dags/ecommerce_dw_etl.py
+
+
+docker exec -it data_warehouse psql -U postgres -d data_warehouse -c \
+"SELECT p.category, p.name, SUM(f.quantity) AS units, SUM(f.line_amount_usd) AS revenue FROM dw.fact_sales_item f JOIN dw.dim_product p USING (product_id) GROUP BY p.category, p.name ORDER BY revenue DESC LIMIT 5;"
+
+docker exec -it data_warehouse psql -U postgres -d data_warehouse -c \
+"SELECT currency, COUNT(*) FROM dw.fact_sales_item WHERE fx_rate_to_usd = 1.0 AND currency <> 'USD' GROUP BY currency;"
+
+
+docker exec -it airflow_scheduler bash -lc 'python -m pip install --user -q pytest pytest-cov && ~/.local/bin/pytest -q'
+
+# update tests:
+docker compose up -d --build airflow-scheduler
+
+docker cp tests/test_etl.py airflow_scheduler:/opt/airflow/tests/test_etl.py
+
+# update analytics:
+docker compose up -d --build airflow-scheduler
+
+docker exec -it airflow_scheduler mkdir -p /opt/airflow/analytics
+docker cp analytics/make_charts.py airflow_scheduler:/opt/airflow/analytics/make_charts.py
+
+
+# installing packages:
+docker exec -it airflow_scheduler bash -lc \
+'python -m pip install --user --no-cache-dir "numpy==1.24.3" "pandas==2.0.3" "matplotlib==3.7.2"'
+
+docker exec -it airflow_scheduler bash -lc 'python /opt/airflow/analytics/make_charts.py'
+
+docker cp requirements_py38.txt airflow_scheduler:/opt/airflow/requirements.txt
+docker exec -it airflow_scheduler bash -lc 'python -m pip install --user --no-cache-dir -r /opt/airflow/requirements.txt'
+
+docker exec -it airflow_scheduler bash -lc "python - <<'PY'
+import sys, pandas, matplotlib
+print(sys.version)
+print('pandas', pandas.__version__)
+print('matplotlib', matplotlib.__version__)
+PY"
+
+docker exec -it airflow_scheduler bash -lc 'python /opt/airflow/analytics/make_charts.py'

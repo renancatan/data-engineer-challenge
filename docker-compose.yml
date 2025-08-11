@@ -110,6 +110,8 @@ services:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+      - ./tests:/opt/airflow/tests
+      - ./analytics:/opt/airflow/analytics
     ports:
       - "8080:8080"
     command: webserver
@@ -133,6 +135,9 @@ services:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres_warehouse:5432/data_warehouse
       AIRFLOW__CORE__FERNET_KEY: 'lK2NzOG26X7GGNnUjEEqZwzJJmXJ3CyushGRI6qjMmY='
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      DW_DB_URL: postgresql+psycopg2://postgres:postgres@data_warehouse:5432/data_warehouse
+      ORDERS_DB_URL: postgresql+psycopg2://postgres:postgres@ecommerce_db1:5432/ecommerce_orders
+      PRODUCTS_DB_URL: postgresql+psycopg2://postgres:postgres@ecommerce_db2:5432/ecommerce_products
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
