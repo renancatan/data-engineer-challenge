@@ -232,9 +232,17 @@ FX_API_KEY=YOUR_API_KEY
 FX_BASE_CURRENCY=USD
 
 ## 1.b) Start the environment
-```bash
-docker compose up -d
-```
+
+# Phase 1: databases only
+docker compose up -d postgres_db1 postgres_db2 postgres_warehouse
+
+# Phase 2: run init as a one-shot and wait for it to finish
+docker compose run --rm airflow-init
+
+# Phase 3: now start webserver + scheduler
+docker compose up -d airflow-webserver airflow-scheduler
+
+
 **(reuse a logical date across commands):**
 ```bash
 export EXEC_DATE=2025-08-09
@@ -248,7 +256,14 @@ docker exec -i data_warehouse psql -U postgres -d data_warehouse < airflow/dags/
 
 ## 3) Dry‑run ETL tasks (Airflow `tasks test`)
 
-**Trigger the whole DAG**
+# Force whole dag run..
+```bash
+docker exec -it airflow_scheduler \
+  airflow dags backfill ecommerce_dw_etl \
+  --start-date 2025-08-09 --end-date 2025-08-09
+```
+
+**Queue / Trigger the whole DAG**
 ```bash
 docker exec -it airflow_scheduler airflow dags trigger ecommerce_dw_etl
 ```

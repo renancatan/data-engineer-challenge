@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, text
 from airflow import DAG
 from airflow.models import Variable
 from airflow.operators.python import PythonOperator
+from sqlalchemy import create_engine, text
 
 # Connection URLs (overridable via env)
 def _pg_url_from_env(default: str, env_key: str) -> str:
@@ -369,6 +370,22 @@ def load_fact_sales_item() -> None:
     except Exception as e:
         print(f"Skipping MV refresh: {e}")
 
+def ensure_dw_views():
+    eng = create_engine(DW_URL, pool_pre_ping=True)
+    with eng.begin() as conn:
+        conn.execute(text("""
+            CREATE SCHEMA IF NOT EXISTS dw;
+            CREATE OR REPLACE VIEW dw.vw_sales_clean AS
+            SELECT
+            f.*,
+            (UPPER(COALESCE(f.currency,'USD')) NOT IN ('USD','EUR','GBP')) AS is_non_iso_currency
+            FROM dw.fact_sales_item f
+            WHERE UPPER(COALESCE(f.currency,'USD')) IN ('USD','EUR','GBP')
+            AND (f.fx_rate_to_usd IS NOT NULL AND f.fx_rate_to_usd > 0)
+            AND (f.quantity IS NOT NULL AND f.quantity >= 0)
+            AND (f.unit_price_orig IS NOT NULL AND f.unit_price_orig >= 0);
+        """))
+        
 # Great Expectations
 def ge_basic_checks():
     import subprocess
@@ -419,10 +436,13 @@ with DAG(
         task_id="load_fact_sales_item",
         python_callable=load_fact_sales_item,
     )
-
+    t_ensure_views = PythonOperator(
+        task_id="ensure_dw_views",
+        python_callable=ensure_dw_views,
+    )
     t_ge = PythonOperator(
         task_id="ge_basic_checks",
         python_callable=ge_basic_checks,
     )
 
-    t_create_dw >> [t_dim_customer, t_dim_product] >> t_fetch_fx >> t_load_fact >> t_ge
+    t_create_dw >> [t_dim_customer, t_dim_product] >> t_fetch_fx >> t_load_fact >> t_ensure_views >> t_ge
