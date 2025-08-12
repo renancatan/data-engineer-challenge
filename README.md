@@ -229,47 +229,105 @@ flowchart LR
   C -->|views| E[BI / Queries\n(vw_sales_base / enriched / clean)]
 
 
+Prereqs
+Docker + Docker Compose installed
 
-# Quick check-list:
+Ports used by Airflow UI and Postgres are free
 
-# 1) Up containers
+Airflow Connections exist:
+
+postgres_db1 → db1
+
+postgres_db2 → db2
+
+postgres_dw → dw
+
+Set an execution date (Airflow “logical date”) you’ll reuse in tests:
+
+
+export EXEC_DATE=2025-08-09
+
+1) Start containers
 docker compose up -d
 
-# 2) (Re)create schema + views + indexes
-docker exec -i data_warehouse psql -U postgres -d data_warehouse < database/dw_schema.sql
+2) (Re)create DW schema, views, and indexes
+docker exec -i data_warehouse psql -U postgres -d data_warehouse < airflow/dags/dw_schema.sql
 
-# 3) Run DAG tasks once
+3) Dry-run each ETL task (Airflow tasks test)
+
+(Optional, run some of them separated for individual control/testing) 
 docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl create_dw_schema 2025-08-09
 docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl upsert_dim_product 2025-08-09
 docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl fetch_daily_fx_rates 2025-08-09
 docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl load_fact_sales_item 2025-08-09
 
-# 4) Run analytics
+trigger the whole DAG:
+docker exec -it airflow_scheduler airflow dags trigger ecommerce_dw_etl
+
+4) Run analytics SQL (materialized views, summaries, etc.)
 docker exec -i data_warehouse psql -U postgres -d data_warehouse < analytics/queries.sql
 
-# 4b) Run dashboard and Generate visuals:
-docker exec -it airflow_scheduler rm -rf /opt/airflow/analytics/figures
-docker cp analytics/make_charts.py airflow_scheduler:/opt/airflow/analytics/make_charts.py
+5) Generate charts and export locally
+
+# give ownership to airflow user (uid 50000) inside the container
+docker exec -u root -it airflow_scheduler bash -lc '
+  mkdir -p /opt/airflow/analytics/figures &&
+  chown -R 50000:0 /opt/airflow/analytics
+'
+
 docker exec -it airflow_scheduler bash -lc 'python /opt/airflow/analytics/make_charts.py'
-rm -rf analytics/figures
-docker cp airflow_scheduler:/opt/airflow/analytics/figures ./analytics/figures
+# if analytics is mounted, results appear on your host:
 ls -1 analytics/figures
 
 
-# 5) Run tests
-docker exec -it airflow_scheduler bash -lc 'mkdir -p /opt/airflow/tests'
-docker cp tests/. airflow_scheduler:/opt/airflow/tests
+Generated artifacts (PNG + CSV) will be under analytics/figures/, e.g.:
+
+daily_revenue_7dma.png / .csv
+
+revenue_by_category.png / .csv
+
+revenue_by_hour.png / .csv
+
+heatmap_weekday_hour.png
+
+top_customers.png / .csv
+
+mom_by_category_top5.png / .csv (bar chart)
+
+(Optional) fx_coverage.png
+
+others new imgs.. also added
+
+6) Run tests (pytest inside scheduler)
+Note: tests import DAG modules, so we set PYTHONPATH=/opt/airflow/dags.
+
 docker exec -it airflow_scheduler bash -lc '
   python -m pip install --user -q pytest pytest-cov &&
   export PATH=$HOME/.local/bin:$PATH &&
-  PYTHONPATH=/opt/airflow/dags pytest -q /opt/airflow/tests'
+  PYTHONPATH=/opt/airflow/dags pytest -q /opt/airflow/tests
+'
 
+just if necessary:
+docker exec -it airflow_scheduler bash -lc 'mkdir -p /opt/airflow/tests'
+docker cp tests/. airflow_scheduler:/opt/airflow/tests
 
-# 6) Run quality checks
+and then again:
+docker exec -it airflow_scheduler bash -lc '
+  python -m pip install --user -q pytest pytest-cov &&
+  export PATH=$HOME/.local/bin:$PATH &&
+  PYTHONPATH=/opt/airflow/dags pytest -q /opt/airflow/tests
+'
+
+7) Run Data Quality checks (Great Expectations)
+
 docker cp analytics/run_dq_checks.py airflow_scheduler:/opt/airflow/analytics/run_dq_checks.py
 docker exec -it airflow_scheduler airflow tasks test \
   --subdir /opt/airflow/dags/ecommerce_dw_etl.py \
   ecommerce_dw_etl ge_basic_checks 2025-08-09
+  
+If invalid ISO currency codes are present (e.g., 55 rows), this task will exit non-zero (by design).
+
+Data Flow (Mermaid)
 
 flowchart LR
   subgraph Sources
@@ -300,17 +358,17 @@ flowchart LR
   D -->|seeds| G & H
   J --> K
   J --> L --> M --> N
-
   N -->|SQL queries| O[[Analytics/Reports]]
 
+Troubleshooting
+- Airflow imports fail in tests
+Ensure: PYTHONPATH=/opt/airflow/dags when running pytest.
 
-  ---
-# 1) Clean any old local copies
-rm -rf analytics/figures
-mkdir -p analytics
+- tests/ not found inside container
+Confirm the docker cp step above, or mount it via docker-compose volumes.
 
-# 2) Copy the whole figures folder out of the container into ./analytics
-docker cp airflow_scheduler:/opt/airflow/analytics/figures ./analytics
+- DQ task fails with non-zero exit
+This is expected when validations fail. Decide whether the DAG should fail (prod) or warn (dev); change the DQ task behavior accordingly.
 
-# 3) Sanity check
-ls -1 analytics/figures
+- Charts not updating locally
+Make sure you clear /opt/airflow/analytics/figures in the container before rerunning, then docker cp the folder back to ./analytics/figures.

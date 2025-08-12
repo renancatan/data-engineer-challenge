@@ -34,7 +34,7 @@
 
 # compatibles:
 psycopg2-binary==2.9.7
-sqlalchemy==2.0.21
+sqlalchemy==1.4.49
 
 pandas==2.0.3
 numpy==1.24.3

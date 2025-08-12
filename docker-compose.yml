@@ -64,7 +64,10 @@ services:
 
   # Airflow Database Initialization
   airflow-init:
-    image: apache/airflow:2.7.0
+    build:
+      context: .
+      dockerfile: docker/airflow/Dockerfile
+    image: de-challenge-airflow:latest
     container_name: airflow_init
     user: "50000:0"
     depends_on:
@@ -86,17 +89,9 @@ services:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
-    command: >
-      bash -c "
-        airflow db init &&
-        airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin
-      "
-    networks:
-      - data_pipeline
 
-  # Apache Airflow Webserver
   airflow-webserver:
-    image: apache/airflow:2.7.0
+    image: de-challenge-airflow:latest
     container_name: airflow_webserver
     user: "50000:0"
     depends_on:
@@ -115,17 +110,9 @@ services:
     ports:
       - "8080:8080"
     command: webserver
-    networks:
-      - data_pipeline
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
 
-  # Apache Airflow Scheduler
   airflow-scheduler:
-    image: apache/airflow:2.7.0
+    image: de-challenge-airflow:latest
     container_name: airflow_scheduler
     user: "50000:0"
     depends_on:
@@ -142,7 +129,10 @@ services:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+      - ./tests:/opt/airflow/tests
+      - ./analytics:/opt/airflow/analytics
     command: scheduler
+
     networks:
       - data_pipeline
 

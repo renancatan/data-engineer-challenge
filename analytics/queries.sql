@@ -94,7 +94,7 @@ ORDER BY revenue DESC;
 
 
 -- Currency quality check (should now be 0 non-ISO)
-SELECT currency, COUNT(*)
+SELECT currency AS WRONG_CURRENCY, COUNT(*)
 FROM dw.vw_sales_base
 WHERE is_non_iso_currency = TRUE
 GROUP BY currency
