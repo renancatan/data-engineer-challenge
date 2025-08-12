@@ -257,11 +257,15 @@ docker exec -it airflow_scheduler airflow dags trigger ecommerce_dw_etl
 ```bash
 docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl create_dw_schema      ${EXEC_DATE:-2025-08-09}
 docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl upsert_dim_product   ${EXEC_DATE:-2025-08-09}
+docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl upsert_dim_customer   ${EXEC_DATE:-2025-08-09}
 docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl fetch_daily_fx_rates ${EXEC_DATE:-2025-08-09}
 docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl load_fact_sales_item ${EXEC_DATE:-2025-08-09}
+docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl ge_basic_checks      ${EXEC_DATE:-2025-08-09}
 ```
 
 ## 4) Run analytics SQL (views / summaries) - **RUN TWICE** to actually see the results
+- Before starting make sure the ecommerce_dw_etl DAG has completed (or run the tasks test sequence) before generating analytics; otherwise some charts may show “Unknown” placeholder values.
+
 ```bash
 docker exec -i data_warehouse psql -U postgres -d data_warehouse < analytics/queries.sql
 ```

@@ -1,24 +1,12 @@
-# analytics/make_charts.py
-# Runs end-to-end:
-# 1) (Re)creates DW views (base/enriched/clean)
-# 2) Executes analytics queries
-# 3) Saves charts & CSVs under analytics/figures/
-#
-# Requires: pandas, matplotlib, SQLAlchemy, psycopg2-binary
-# Python 3.8 compatible (no PEP 604 | unions)
-
 import os
 import shutil
 from pathlib import Path
 from typing import Optional, Dict, List
-
 import pandas as pd
 import matplotlib.pyplot as plt
 from sqlalchemy import create_engine, text
 
-# -----------------------
 # Config (env overrides)
-# -----------------------
 PG_USER = os.getenv("DW_PG_USER", "postgres")
 PG_PASS = os.getenv("DW_PG_PASSWORD", "postgres")
 PG_HOST = os.getenv("DW_PG_HOST", "data_warehouse")
@@ -40,9 +28,7 @@ if OUT_DIR.exists():
     shutil.rmtree(OUT_DIR)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# -----------------------
 # SQL blocks
-# -----------------------
 VIEWS_SQL = """
 -- Remove old views (idempotent)
 DROP VIEW IF EXISTS dw.vw_sales_clean;
@@ -207,9 +193,38 @@ GROUP BY country
 ORDER BY avg_order_value DESC;
 """
 
-# -----------------------
+Q_REVENUE_BY_PRODUCT = """
+WITH params AS (
+  SELECT DATE %(start)s AS start_date, DATE %(end)s AS end_date
+)
+SELECT
+  s.product_name,
+  SUM(s.line_amount_usd) AS revenue,
+  SUM(s.quantity)        AS units
+FROM dw.vw_sales_clean s
+CROSS JOIN params p
+WHERE to_date(s.date_key::text,'YYYYMMDD') BETWEEN p.start_date AND p.end_date
+GROUP BY s.product_name
+ORDER BY revenue DESC
+LIMIT 15;
+"""
+
+Q_REVENUE_BY_COUNTRY = """
+WITH params AS (
+  SELECT DATE %(start)s AS start_date, DATE %(end)s AS end_date
+)
+SELECT
+  COALESCE(NULLIF(TRIM(c.country), ''), 'Unknown') AS country,
+  SUM(s.line_amount_usd)                           AS revenue
+FROM dw.vw_sales_clean s
+LEFT JOIN dw.dim_customer c ON c.customer_id = s.customer_id
+CROSS JOIN params p
+WHERE to_date(s.date_key::text,'YYYYMMDD') BETWEEN p.start_date AND p.end_date
+GROUP BY country
+ORDER BY revenue DESC;
+"""
+
 # Helpers
-# -----------------------
 def run_df(sql: str, params: Optional[Dict] = None) -> pd.DataFrame:
     return pd.read_sql(sql, eng, params=params or {"start": START_DATE, "end": END_DATE})
 
@@ -233,9 +248,7 @@ def fig_save(name: str) -> Path:
     plt.close()
     return p
 
-# -----------------------
 # Charts
-# -----------------------
 def chart_revenue_by_category() -> Optional[Path]:
     df = run_df(Q_REVENUE_BY_CATEGORY)
     save_csv(df, "revenue_by_category")
@@ -303,7 +316,6 @@ def chart_weekday_hour_heatmap() -> Optional[Path]:
 
 def _clean_label_series(name_ser: pd.Series, country_ser: pd.Series) -> List[str]:
     name = name_ser.fillna("Unknown").astype(str).str.strip()
-    # squash any "~unknown ..." or "unknown..." to a clean token
     name = name.str.replace(r"^\s*~?\s*unknown.*$", "Unknown Customer", regex=True, case=False)
     country = country_ser.fillna("Unknown").astype(str).str.strip().str.title()
     return (name + " — " + country).tolist()
@@ -321,7 +333,6 @@ def chart_top_customers() -> Optional[Path]:
     return fig_save("top_customers")
 
 def chart_monthly_revenue_by_category_bars() -> Optional[Path]:
-    # grouped bars for top 5 categories across months (easier than lines)
     df = run_df(Q_MOM_BY_CATEGORY)
     if df.empty:
         return None
@@ -362,9 +373,31 @@ def chart_avg_revenue_per_order_by_country() -> Optional[Path]:
     plt.title("Avg Revenue per Order by Country ({s} .. {e})".format(s=START_DATE, e=END_DATE))
     return fig_save("avg_order_value_by_country")
 
-# -----------------------
+def chart_revenue_by_product_bars() -> Optional[Path]:
+    df = run_df(Q_REVENUE_BY_PRODUCT)
+    save_csv(df, "revenue_by_product_top15")
+    if df.empty:
+        return None
+    plt.figure()
+    plt.bar(df["product_name"], df["revenue"])
+    plt.xticks(rotation=30, ha="right")
+    plt.ylabel("Revenue (USD)")
+    plt.title(f"Revenue by Product — Top 15 ({START_DATE} .. {END_DATE})")
+    return fig_save("revenue_by_product_top15")
+
+def chart_revenue_by_country_bars() -> Optional[Path]:
+    df = run_df(Q_REVENUE_BY_COUNTRY)
+    save_csv(df, "revenue_by_country")
+    if df.empty:
+        return None
+    plt.figure()
+    plt.bar(df["country"], df["revenue"])
+    plt.xticks(rotation=30, ha="right")
+    plt.ylabel("Revenue (USD)")
+    plt.title(f"Revenue by Country ({START_DATE} .. {END_DATE})")
+    return fig_save("revenue_by_country")
+
 # Main
-# -----------------------
 def main() -> None:
     print("Connecting:", ENGINE_URL)
     ensure_views()
@@ -372,14 +405,16 @@ def main() -> None:
 
     outputs = [
         chart_revenue_by_category(),
+        chart_revenue_by_product_bars(),
+        chart_revenue_by_country_bars(),
         chart_revenue_by_hour(),
         chart_daily_trend_ma(),
-        chart_daily_cumulative(),                      # NEW
+        chart_daily_cumulative(),
         chart_weekday_hour_heatmap(),
         chart_top_customers(),
-        chart_monthly_revenue_by_category_bars(),      # CHANGED to bars
+        chart_monthly_revenue_by_category_bars(),
         chart_fx_coverage(),
-        chart_avg_revenue_per_order_by_country(),      # NEW
+        chart_avg_revenue_per_order_by_country(),
     ]
     outputs = [p for p in outputs if p]
 

@@ -1,7 +1,8 @@
 from __future__ import annotations
 import os
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from typing import List, Optional
+
 import requests
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -9,24 +10,28 @@ from airflow import DAG
 from airflow.models import Variable
 from airflow.operators.python import PythonOperator
 
-
+# --------------------------------------------------------------------
+# Connection URLs (overridable via env)
+# --------------------------------------------------------------------
 def _pg_url_from_env(default: str, env_key: str) -> str:
     return os.environ.get(env_key, default)
 
-# Container-internal hosts/ports
 ORDERS_URL   = _pg_url_from_env("postgresql+psycopg2://postgres:postgres@ecommerce_db1:5432/ecommerce_orders", "ORDERS_DB_URL")
 PRODUCTS_URL = _pg_url_from_env("postgresql+psycopg2://postgres:postgres@ecommerce_db2:5432/ecommerce_products", "PRODUCTS_DB_URL")
 DW_URL       = _pg_url_from_env("postgresql+psycopg2://postgres:postgres@data_warehouse:5432/data_warehouse", "DW_DB_URL")
 
-# FX API (v6.exchangerate-api.com). Provide via .env:
-#   FX_API_KEY=xxxxx
-#   FX_BASE_CURRENCY=USD
+# --------------------------------------------------------------------
+# FX API config (v6.exchangerate-api.com)
+#   Put in .env: FX_API_KEY=xxxxx, FX_BASE_CURRENCY=USD
+# --------------------------------------------------------------------
 FX_API_KEY        = os.environ.get("FX_API_KEY", "").strip()
 FX_BASE_CURRENCY  = os.environ.get("FX_BASE_CURRENCY", "USD").strip().upper()
 FX_PROVIDER_NAME  = "exchangerate-api.com"
-FX_API_URL_TPL    = "https://v6.exchangerate-api.com/v6/{key}/latest/{base}"  # returns conversion_rates: units of <target> per 1 <base>
+FX_API_URL_TPL    = "https://v6.exchangerate-api.com/v6/{key}/latest/{base}"  # 1 <base> -> X <code>
 
-
+# --------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------
 def _pick_col(engine, table: str, candidates: List[str]) -> str:
     q = text("""
       SELECT column_name
@@ -40,16 +45,19 @@ def _pick_col(engine, table: str, candidates: List[str]) -> str:
             return c
     raise RuntimeError(f"No candidate column found in {table}. Tried: {candidates}")
 
-
-# -------------------------------
-# DDL: create DW schema/tables
-# -------------------------------
-
+# --------------------------------------------------------------------
+# DDL
+# --------------------------------------------------------------------
 def create_dw_schema() -> None:
     engine = create_engine(DW_URL, pool_pre_ping=True)
     ddl_sql = Variable.get("dw_schema_sql", default_var=None)
     if not ddl_sql:
-        for p in ["/opt/airflow/dags/dw_schema.sql", "/files/dw_schema.sql", "/opt/airflow/dags/database/dw_schema.sql", "/opt/airflow/dags/airflow/dags/dw_schema.sql"]:
+        for p in [
+            "/opt/airflow/dags/dw_schema.sql",
+            "/files/dw_schema.sql",
+            "/opt/airflow/dags/database/dw_schema.sql",
+            "/opt/airflow/dags/airflow/dags/dw_schema.sql",
+        ]:
             if os.path.exists(p):
                 with open(p, "r", encoding="utf-8") as fh:
                     ddl_sql = fh.read()
@@ -59,11 +67,9 @@ def create_dw_schema() -> None:
     with engine.begin() as conn:
         conn.execute(text(ddl_sql))
 
-
-# -------------------------------
-# Dimension upserts
-# -------------------------------
-
+# --------------------------------------------------------------------
+# Dimensions
+# --------------------------------------------------------------------
 def upsert_dim_customer() -> None:
     src = create_engine(ORDERS_URL, pool_pre_ping=True)
     tgt = create_engine(DW_URL, pool_pre_ping=True)
@@ -108,8 +114,7 @@ def upsert_dim_customer() -> None:
     select_parts.append(f"{email_col} AS email" if email_col else "NULL::text AS email")
     select_parts.append(f"{country_col} AS country" if country_col else "NULL::text AS country")
 
-    sql = "SELECT " + ", ".join(select_parts) + " FROM customers"
-    df = pd.read_sql(sql, src)
+    df = pd.read_sql("SELECT " + ", ".join(select_parts) + " FROM customers", src)
 
     upsert_sql = text("""
         INSERT INTO dw.dim_customer(customer_id, full_name, email, country)
@@ -128,7 +133,6 @@ def upsert_dim_customer() -> None:
                 email=row.get("email"),
                 country=row.get("country"),
             ))
-
 
 def upsert_dim_product() -> None:
     src = create_engine(PRODUCTS_URL, pool_pre_ping=True)
@@ -180,116 +184,87 @@ def upsert_dim_product() -> None:
                 description=row.get("description"),
             ))
 
-
-# -------------------------------
-# FX (external API) + Fact load
-# -------------------------------
-
-def _ensure_fx_table(conn) -> None:
-    conn.execute(text("""
-        CREATE SCHEMA IF NOT EXISTS dw;
-        CREATE TABLE IF NOT EXISTS dw.dim_fx_rate (
-            fx_date      DATE      NOT NULL,
-            currency     CHAR(3)   NOT NULL,
-            rate_to_usd  NUMERIC   NOT NULL,
-            source       TEXT      NULL,
-            fetched_at   TIMESTAMP NOT NULL DEFAULT NOW(),
-            PRIMARY KEY (fx_date, currency)
-        );
-    """))
-
-def _fetch_usd_base_rates() -> dict:
+# --------------------------------------------------------------------
+# FX + Fact load
+# --------------------------------------------------------------------
+def _fetch_base_rates() -> tuple[dict, str]:
     """
-    Calls v6.exchangerate-api with USD base and returns the 'conversion_rates' mapping.
-    conversion_rates gives: 1 USD -> X <currency>.
-    To compute <currency> -> USD we will use 1 / X.
+    Call v6.exchangerate-api with FX_BASE_CURRENCY and return ('conversion_rates', base).
+    conversion_rates: 1 <base> -> X <code>
     """
     if not FX_API_KEY:
-        raise ValueError("FX_API_KEY is missing; add it to your .env or compose env_file.")
-    url = FX_API_URL_TPL.format(key=FX_API_KEY, base=FX_BASE_CURRENCY or "USD")
+        raise ValueError("FX_API_KEY is missing; add it to your .env and ensure compose uses env_file.")
+    base = FX_BASE_CURRENCY or "USD"
+    url = FX_API_URL_TPL.format(key=FX_API_KEY, base=base)
     resp = requests.get(url, timeout=20)
     resp.raise_for_status()
     payload = resp.json()
     if payload.get("result") != "success":
         raise RuntimeError(f"FX API error: {payload}")
-    return payload.get("conversion_rates", {})
+    return payload.get("conversion_rates", {}), base
 
 def fetch_daily_fx_rates(execution_date_str: Optional[str] = None) -> None:
     """
-    Backfill FX for the entire orders date range so every order date joins.
-    - Reads min/max order_timestamp and distinct currencies from source `orders`
-    - Calls v6.exchangerate-api once (USD base) using FX_API_KEY
-    - Inverts to get code->USD and writes one row per (date, currency) to dw.dim_fx_rate
-    Notes:
-      * We insert USD=1.0 for all dates.
-      * For EUR/GBP (and any other 3-letter codes found), we use the 'latest' quote for all days.
-        (Good enough for the challenge; proper historical series would require a paid API or a rates dataset.)
+    Populate dw.dim_fx_rate with one row per (date, currency).
+    - If execution_date_str is provided, only that date is written.
+    - Otherwise, min..max order dates are backfilled.
+    - Rates are normalized to USD even if FX_BASE_CURRENCY != USD.
     """
-    from datetime import date, timedelta
-
-    api_key = os.getenv("FX_API_KEY")
-    if not api_key:
-        raise RuntimeError("FX_API_KEY is missing. Put it in .env and ensure docker-compose `env_file: .env` on scheduler/webserver.")
-
     orders_eng = create_engine(ORDERS_URL, pool_pre_ping=True)
-    dw_eng = create_engine(DW_URL, pool_pre_ping=True)
+    dw_eng     = create_engine(DW_URL, pool_pre_ping=True)
 
     ts_col = _pick_col(orders_eng, "orders", ["order_timestamp", "order_datetime", "created_at", "ordered_at", "order_date"])
     cur_col = _pick_col(orders_eng, "orders", ["currency", "currency_code"])
 
-    # discover date range and currencies present in source orders
-    minmax = pd.read_sql(f"SELECT MIN({ts_col}) AS min_ts, MAX({ts_col}) AS max_ts FROM orders", orders_eng)
-    if minmax.empty or pd.isna(minmax.loc[0, "min_ts"]) or pd.isna(minmax.loc[0, "max_ts"]):
-        print("No orders found — skipping FX.")
-        return
-    start_d = pd.to_datetime(minmax.loc[0, "min_ts"]).date()
-    end_d   = pd.to_datetime(minmax.loc[0, "max_ts"]).date()
+    if execution_date_str:
+        start_d = end_d = pd.to_datetime(execution_date_str).date()
+    else:
+        mm = pd.read_sql(f"SELECT MIN({ts_col}) AS min_ts, MAX({ts_col}) AS max_ts FROM orders", orders_eng)
+        if mm.empty or pd.isna(mm.loc[0, "min_ts"]) or pd.isna(mm.loc[0, "max_ts"]):
+            print("No orders found — skipping FX.")
+            return
+        start_d = pd.to_datetime(mm.loc[0, "min_ts"]).date()
+        end_d   = pd.to_datetime(mm.loc[0, "max_ts"]).date()
 
     cur_df = pd.read_sql(f"SELECT DISTINCT {cur_col} AS currency FROM orders", orders_eng)
-    currencies = {str(c).upper() for c in cur_df["currency"].dropna().tolist()}
-    # keep simple ISO set; always include USD baseline
-    currencies = {c[:3] for c in currencies if len(c) >= 3}
+    currencies = {str(c).upper()[:3] for c in cur_df["currency"].dropna().tolist()}
     currencies.update({"USD", "EUR", "GBP"})
     currencies = sorted(currencies)
 
-    # fetch USD-base conversion table once
-    url = f"https://v6.exchangerate-api.com/v6/{api_key}/latest/USD"
-    resp = requests.get(url, timeout=20)
-    resp.raise_for_status()
-    payload = resp.json()
-    if payload.get("result") != "success":
-        raise RuntimeError(f"FX API error: {payload}")
-    # conversion_rates: 1 USD -> X <ccy>
-    usd_base = payload.get("conversion_rates", {})
+    base_rates, base = _fetch_base_rates()
 
-    # prepare a mapping code->USD (invert USD->code)
-    def code_to_usd(code: str) -> float:
-        if code == "USD":
-            return 1.0
-        x = usd_base.get(code)
-        if x is None or float(x) == 0.0:
-            return 1.0  # fallback; will be flagged downstream as fx fallback if not USD
-        return 1.0 / float(x)
+    if base == "USD":
+        # 1 USD -> x code  ⇒  1 code -> (1/x) USD
+        def code_to_usd(code: str) -> float:
+            if code == "USD": return 1.0
+            x = base_rates.get(code)
+            return 1.0 / float(x) if x else 1.0
+    else:
+        # 1 base -> x USD and 1 base -> y code ⇒ 1 code -> (x/y) USD
+        usd_per_base = float(base_rates.get("USD", 0)) or 0.0
+        def code_to_usd(code: str) -> float:
+            if code == "USD": return 1.0
+            y = base_rates.get(code)
+            if not usd_per_base or not y: return 1.0
+            return usd_per_base / float(y)
 
-    # upsert for each day in range
     with dw_eng.begin() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS dw.dim_fx_rate (
-              fx_date      DATE      NOT NULL,
-              currency     CHAR(3)   NOT NULL,
-              rate_to_usd  NUMERIC(18,8) NOT NULL,
+              fx_date      DATE                      NOT NULL,
+              currency     CHAR(3)                   NOT NULL,
+              rate_to_usd  NUMERIC(18,8)             NOT NULL,
               source       TEXT,
-              fetched_at   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+              fetched_at   TIMESTAMP WITH TIME ZONE  NOT NULL DEFAULT NOW(),
               PRIMARY KEY (fx_date, currency)
             );
         """))
         d = start_d
-        src = "exchangerate-api.com (latest as of load)"
+        src = f"{FX_PROVIDER_NAME} (latest base={base})"
         rows = []
         while d <= end_d:
             for code in currencies:
                 rows.append({"d": d, "c": code, "r": code_to_usd(code), "s": src})
-            # batch insert per day to keep memory bounded
             conn.execute(text("""
                 INSERT INTO dw.dim_fx_rate(fx_date, currency, rate_to_usd, source, fetched_at)
                 VALUES (:d, :c, :r, :s, NOW())
@@ -301,15 +276,13 @@ def fetch_daily_fx_rates(execution_date_str: Optional[str] = None) -> None:
             rows.clear()
             d += timedelta(days=1)
 
-    print(f"FX backfill done for {start_d}..{end_d} for currencies: {', '.join(currencies)}")
-
+    print(f"FX populated for {start_d}..{end_d} (base={base}); ccy: {', '.join(currencies)}")
 
 def load_fact_sales_item() -> None:
-    orders_eng = create_engine(ORDERS_URL, pool_pre_ping=True)
+    orders_eng   = create_engine(ORDERS_URL, pool_pre_ping=True)
     products_eng = create_engine(PRODUCTS_URL, pool_pre_ping=True)
-    dw_eng = create_engine(DW_URL, pool_pre_ping=True)
+    dw_eng       = create_engine(DW_URL, pool_pre_ping=True)
 
-    # Resolve column names from sources
     order_pk = _pick_col(orders_eng, "orders", ["order_id", "id"])
     cust_fk  = _pick_col(orders_eng, "orders", ["customer_id", "customer", "cust_id"])
     ts_col   = _pick_col(orders_eng, "orders", ["order_timestamp", "order_datetime", "created_at", "ordered_at", "order_date"])
@@ -320,10 +293,8 @@ def load_fact_sales_item() -> None:
     items_prod_fk  = _pick_col(orders_eng, "order_items", ["product_id", "product"])
     qty_col        = _pick_col(orders_eng, "order_items", ["quantity", "qty"])
     price_col      = _pick_col(orders_eng, "order_items", ["unit_price", "price", "unitprice"])
+    prod_pk        = _pick_col(products_eng, "product_descriptions", ["product_id", "id"])
 
-    prod_pk = _pick_col(products_eng, "product_descriptions", ["product_id", "id"])
-
-    # Extract
     orders_df = pd.read_sql(f"""
         SELECT
           {order_pk} AS order_id,
@@ -345,37 +316,31 @@ def load_fact_sales_item() -> None:
 
     prod_df = pd.read_sql(f"SELECT {prod_pk} AS product_id FROM product_descriptions", products_eng)
 
-    # Transform
     df = items_df.merge(orders_df, on="order_id", how="inner").merge(prod_df, on="product_id", how="left")
     df["order_timestamp"] = pd.to_datetime(df["order_timestamp"])
     df["date_key"] = df["order_timestamp"].dt.strftime("%Y%m%d").astype(int)
     df["time_key"] = (df["order_timestamp"].dt.hour * 60 + df["order_timestamp"].dt.minute).astype(int)
 
-    df["currency"] = df["currency"].fillna("USD").astype(str).str.upper()
-    df["quantity"] = df["quantity"].astype(float)
+    df["currency"]   = df["currency"].fillna("USD").astype(str).str.upper()
+    df["quantity"]   = df["quantity"].astype(float)
     df["unit_price"] = df["unit_price"].astype(float)
 
-    # FX lookup by (fx_date, currency)
     df["fx_date"] = df["order_timestamp"].dt.date
     fx_df = pd.read_sql("SELECT fx_date, currency, rate_to_usd FROM dw.dim_fx_rate", dw_eng)
     fx_df["currency"] = fx_df["currency"].astype(str).str.upper()
 
     df = df.merge(
-        fx_df,
-        left_on=["fx_date", "currency"],
-        right_on=["fx_date", "currency"],
-        how="left"
+        fx_df, left_on=["fx_date", "currency"], right_on=["fx_date", "currency"], how="left"
     ).rename(columns={"unit_price": "unit_price_orig"})
 
-    # Fill missing FX (USD=1.0; others fallback 1.0 → flagged elsewhere)
+    # Fill missing FX: USD=>1.0, others->1.0 fallback (flagged in views)
     df["rate_to_usd"] = df.apply(
         lambda r: 1.0 if (pd.isna(r["rate_to_usd"]) and r["currency"] == "USD")
         else (r["rate_to_usd"] if not pd.isna(r["rate_to_usd"]) else 1.0),
         axis=1
     )
 
-    # Do NOT compute / send unit_price_usd or line_amount_usd — they are GENERATED in Postgres
-
+    # NOTE: unit_price_usd & line_amount_usd are GENERATED in Postgres—don't send them
     load_cols = [
         "order_item_id", "order_id", "product_id", "customer_id",
         "date_key", "time_key", "quantity",
@@ -404,37 +369,31 @@ def load_fact_sales_item() -> None:
             unit_price_orig = EXCLUDED.unit_price_orig,
             currency        = EXCLUDED.currency,
             fx_rate_to_usd  = EXCLUDED.fx_rate_to_usd;
-        -- unit_price_usd / line_amount_usd are GENERATED ALWAYS ... let Postgres compute them
     """)
 
-    # Load
     with dw_eng.begin() as conn:
         conn.execute(text("SET search_path = dw, public"))
         conn.execute(upsert_sql, df_load.to_dict(orient="records"))
     print(f"Upserted rows into dw.fact_sales_item: {len(df_load)}")
 
-    # Refresh MV in a separate txn
     try:
         with dw_eng.begin() as conn:
             conn.execute(text("REFRESH MATERIALIZED VIEW dw.mv_hourly_sales;"))
     except Exception as e:
         print(f"Skipping MV refresh: {e}")
 
-# -------------------------------
-# Great Expectations runner
-# -------------------------------
-
+# --------------------------------------------------------------------
+# Great Expectations
+# --------------------------------------------------------------------
 def ge_basic_checks():
     import subprocess
     env = os.environ.copy()
     env["DW_DB_URL"] = os.getenv("DW_DB_URL", DW_URL)
     subprocess.check_call(["python", "/opt/airflow/analytics/run_dq_checks.py"], env=env)
 
-
-# -------------------------------
+# --------------------------------------------------------------------
 # DAG
-# -------------------------------
-
+# --------------------------------------------------------------------
 default_args = {
     "owner": "data-eng",
     "depends_on_past": False,
