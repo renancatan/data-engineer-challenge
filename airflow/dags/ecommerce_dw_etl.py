@@ -2,7 +2,6 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta
 from typing import List, Optional
-
 import requests
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -10,9 +9,7 @@ from airflow import DAG
 from airflow.models import Variable
 from airflow.operators.python import PythonOperator
 
-# --------------------------------------------------------------------
 # Connection URLs (overridable via env)
-# --------------------------------------------------------------------
 def _pg_url_from_env(default: str, env_key: str) -> str:
     return os.environ.get(env_key, default)
 
@@ -20,18 +17,14 @@ ORDERS_URL   = _pg_url_from_env("postgresql+psycopg2://postgres:postgres@ecommer
 PRODUCTS_URL = _pg_url_from_env("postgresql+psycopg2://postgres:postgres@ecommerce_db2:5432/ecommerce_products", "PRODUCTS_DB_URL")
 DW_URL       = _pg_url_from_env("postgresql+psycopg2://postgres:postgres@data_warehouse:5432/data_warehouse", "DW_DB_URL")
 
-# --------------------------------------------------------------------
 # FX API config (v6.exchangerate-api.com)
 #   Put in .env: FX_API_KEY=xxxxx, FX_BASE_CURRENCY=USD
-# --------------------------------------------------------------------
 FX_API_KEY        = os.environ.get("FX_API_KEY", "").strip()
 FX_BASE_CURRENCY  = os.environ.get("FX_BASE_CURRENCY", "USD").strip().upper()
 FX_PROVIDER_NAME  = "exchangerate-api.com"
 FX_API_URL_TPL    = "https://v6.exchangerate-api.com/v6/{key}/latest/{base}"  # 1 <base> -> X <code>
 
-# --------------------------------------------------------------------
 # Helpers
-# --------------------------------------------------------------------
 def _pick_col(engine, table: str, candidates: List[str]) -> str:
     q = text("""
       SELECT column_name
@@ -45,9 +38,7 @@ def _pick_col(engine, table: str, candidates: List[str]) -> str:
             return c
     raise RuntimeError(f"No candidate column found in {table}. Tried: {candidates}")
 
-# --------------------------------------------------------------------
 # DDL
-# --------------------------------------------------------------------
 def create_dw_schema() -> None:
     engine = create_engine(DW_URL, pool_pre_ping=True)
     ddl_sql = Variable.get("dw_schema_sql", default_var=None)
@@ -67,9 +58,7 @@ def create_dw_schema() -> None:
     with engine.begin() as conn:
         conn.execute(text(ddl_sql))
 
-# --------------------------------------------------------------------
 # Dimensions
-# --------------------------------------------------------------------
 def upsert_dim_customer() -> None:
     src = create_engine(ORDERS_URL, pool_pre_ping=True)
     tgt = create_engine(DW_URL, pool_pre_ping=True)
@@ -184,9 +173,7 @@ def upsert_dim_product() -> None:
                 description=row.get("description"),
             ))
 
-# --------------------------------------------------------------------
 # FX + Fact load
-# --------------------------------------------------------------------
 def _fetch_base_rates() -> tuple[dict, str]:
     """
     Call v6.exchangerate-api with FX_BASE_CURRENCY and return ('conversion_rates', base).
@@ -382,18 +369,14 @@ def load_fact_sales_item() -> None:
     except Exception as e:
         print(f"Skipping MV refresh: {e}")
 
-# --------------------------------------------------------------------
 # Great Expectations
-# --------------------------------------------------------------------
 def ge_basic_checks():
     import subprocess
     env = os.environ.copy()
     env["DW_DB_URL"] = os.getenv("DW_DB_URL", DW_URL)
     subprocess.check_call(["python", "/opt/airflow/analytics/run_dq_checks.py"], env=env)
 
-# --------------------------------------------------------------------
 # DAG
-# --------------------------------------------------------------------
 default_args = {
     "owner": "data-eng",
     "depends_on_past": False,
