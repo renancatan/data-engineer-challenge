@@ -222,17 +222,24 @@ export AIRFLOW_UID=$(id -u)
 export AIRFLOW_GID=$(id -g)
 ```
 
-**Optional (reuse a logical date across commands):**
+---
+
+
+## 1) Create the `.env` file (before starting containers)
+
+In the project root, create a file named `.env` with the following content, replacing `YOUR_API_KEY` with your real FX API key:
+FX_API_KEY=YOUR_API_KEY
+FX_BASE_CURRENCY=USD
+
+## 1.b) Start the environment
+```bash
+docker compose up -d
+```
+**(reuse a logical date across commands):**
 ```bash
 export EXEC_DATE=2025-08-09
 ```
 
----
-
-## 1) Start the environment
-```bash
-docker compose up -d
-```
 
 ## 2) (Re)create DW schema, views, and indexes
 ```bash
@@ -254,8 +261,7 @@ docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/
 docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl load_fact_sales_item ${EXEC_DATE:-2025-08-09}
 ```
 
-
-## 4) Run analytics SQL (views / summaries)
+## 4) Run analytics SQL (views / summaries) - **RUN TWICE** to actually see the results
 ```bash
 docker exec -i data_warehouse psql -U postgres -d data_warehouse < analytics/queries.sql
 ```
@@ -266,16 +272,6 @@ docker exec -i data_warehouse psql -U postgres -d data_warehouse < analytics/que
 ```bash
 docker exec -it airflow_scheduler bash -lc 'python /opt/airflow/analytics/make_charts.py'
 ls -1 analytics/figures
-```
-
-**First run only (fix container permissions if needed):**
-```bash
-docker exec -u root -it airflow_scheduler bash -lc '
-  mkdir -p /opt/airflow/analytics/figures &&
-  chown -R 50000:0 /opt/airflow/analytics/figures &&
-  find /opt/airflow/analytics/figures -type d -exec chmod 0775 {} \; &&
-  find /opt/airflow/analytics/figures -type f -exec chmod 0664 {} \;
-'
 ```
 
 **Expected artifacts**
@@ -299,6 +295,85 @@ docker exec -it airflow_scheduler bash -lc 'python -m pip install --user -q pyte
 docker cp analytics/run_dq_checks.py airflow_scheduler:/opt/airflow/analytics/run_dq_checks.py
 docker exec -it airflow_scheduler airflow tasks test   --subdir /opt/airflow/dags/ecommerce_dw_etl.py   ecommerce_dw_etl ge_basic_checks ${EXEC_DATE:-2025-08-09}
 ```
+
+## 8) Optional — verify FX is applied
+
+> Assumes you’ve already run:
+> ```
+> docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl fetch_daily_fx_rates 2025-08-09
+> docker exec -it airflow_scheduler airflow tasks test --subdir /opt/airflow/dags/ecommerce_dw_etl.py ecommerce_dw_etl load_fact_sales_item 2025-08-09
+> ```
+
+### 8.a) Spot-check 10 fact rows (showing FX columns)
+```bash
+docker exec -i data_warehouse psql -U postgres -d data_warehouse -c "
+SELECT order_item_id, currency, fx_rate_to_usd, unit_price_orig, unit_price_usd, line_amount_usd
+FROM dw.fact_sales_item
+ORDER BY order_item_id
+LIMIT 10;"
+```
+
+### 8.b) FX summary by currency (proves API rates applied) rates for EUR and GBP, since the others arent real currency, so they will remain the same rate.
+```bash
+docker exec -i data_warehouse psql -U postgres -d data_warehouse -c "
+SELECT currency, COUNT(*) AS rows, ROUND(AVG(fx_rate_to_usd), 6) AS avg_fx
+FROM dw.fact_sales_item
+GROUP BY currency
+ORDER BY currency;"
+```
+
+### 8.c) Show only non-USD converted rows (sanity check)
+```bash
+  docker exec -i data_warehouse psql -U postgres -d data_warehouse -c "
+SELECT order_item_id, currency, fx_rate_to_usd,
+       unit_price_orig,
+       unit_price_usd,
+       (unit_price_orig * fx_rate_to_usd)::numeric(18,4) AS expected_usd
+FROM dw.fact_sales_item
+WHERE currency IN ('EUR','GBP')
+ORDER BY order_item_id
+LIMIT 10;"
+```
+
+### 8.d) (Optional) See what’s in the FX dimension for today’s load date
+```bash
+docker exec -i data_warehouse psql -U postgres -d data_warehouse -c "
+SELECT fx_date, currency, rate_to_usd, source, fetched_at
+FROM dw.dim_fx_rate
+ORDER BY fx_date DESC, currency
+LIMIT 20;"
+```
+
+---
+
+## For Scalability:
+
+- Containerize services (already done), deploy on Kubernetes (e.g., AKS, EKS, GKE) for scaling Airflow workers and database pods.
+
+- Use a managed Postgres or cloud data warehouse (BigQuery, Snowflake, Redshift) for horizontal scaling and performance.
+
+- Switch to Airflow’s Celery/KubernetesExecutor to scale ETL in parallel.
+
+- Introduce partitioned tables and clustering for big fact tables.
+
+- Add CI/CD pipelines to deploy DAGs and schema changes
+
+
+---
+
+## Notes for improvement:
+
+- Add structured logging to ETL scripts (Python logging with JSON formatter)
+
+- Send logs to a central store (ELK, Loki+Grafana, CloudWatch)
+
+- Include log context (dag_id, task_id, execution_date, record counts, durations)
+
+- Add alerting on failed tasks or unexpected row counts
+
+- Modularize the code better (It`s using only one script with all funcs instead of break them down into folders, specific jobs, etc)
+
+- Note: 4 GB RAM limit from the challenge specs is not enforced here, as this environment uses your host’s available resources.
 
 ---
 

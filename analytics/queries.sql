@@ -32,14 +32,6 @@ SELECT *
 FROM dw.vw_sales_enriched
 WHERE is_non_iso_currency = FALSE;
 
--- If you ALSO want to drop FX fallbacks, use this instead:
--- CREATE OR REPLACE VIEW dw.vw_sales_clean AS
--- SELECT * FROM dw.vw_sales_enriched
--- WHERE is_non_iso_currency = FALSE AND is_fx_fallback = FALSE;
-
-
-
-
 
 -- Top products by revenue (date window + optional category filter)
 WITH params AS (
@@ -92,6 +84,16 @@ WHERE to_date(s.date_key::text,'YYYYMMDD') BETWEEN p.start_date AND p.end_date
 GROUP BY s.product_category
 ORDER BY revenue DESC;
 
+-- Top 10 products by revenue and units
+SELECT
+  p.name AS product_name,
+  SUM(f.quantity)        AS units,
+  SUM(f.line_amount_usd) AS revenue_usd
+FROM dw.fact_sales_item f
+JOIN dw.dim_product p USING (product_id)
+GROUP BY p.name
+ORDER BY revenue_usd DESC
+LIMIT 10;
 
 -- Currency quality check (should now be 0 non-ISO)
 SELECT currency AS WRONG_CURRENCY, COUNT(*)
@@ -99,3 +101,9 @@ FROM dw.vw_sales_base
 WHERE is_non_iso_currency = TRUE
 GROUP BY currency
 ORDER BY COUNT(*) DESC;
+
+-- retrieved values from the API + code to check the latest FX rates and non real currency corrections
+SELECT fx_date, currency, rate_to_usd, source, fetched_at
+FROM dw.dim_fx_rate
+ORDER BY fx_date DESC, currency
+LIMIT 20;
