@@ -89,6 +89,11 @@ services:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
+    command: >
+      bash -c "
+        airflow db init &&
+        airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin
+      "
     networks:
       - data_pipeline
       
@@ -117,7 +122,11 @@ services:
     command: webserver
     networks:
       - data_pipeline
-
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
   airflow-scheduler:
     image: de-challenge-airflow:latest
     container_name: airflow_scheduler
