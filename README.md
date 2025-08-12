@@ -324,19 +324,17 @@ docker cp analytics/run_dq_checks.py airflow_scheduler:/opt/airflow/analytics/ru
 docker exec -it airflow_scheduler airflow tasks test \
   --subdir /opt/airflow/dags/ecommerce_dw_etl.py \
   ecommerce_dw_etl ge_basic_checks 2025-08-09
-  
-If invalid ISO currency codes are present (e.g., 55 rows), this task will exit non-zero (by design).
 
-Data Flow (Mermaid)
+If invalid ISO currency codes are present (e.g., 55 rows), this task will exit non-zero (by design).
 
 flowchart LR
   subgraph Sources
-    A[(Postgres: ecommerce_db1\ncustomers/orders/order_items)]
-    B[(Postgres: ecommerce_db2\nproduct_descriptions)]
+    A[(Postgres: ecommerce_db1<br/>customers/orders/order_items)]
+    B[(Postgres: ecommerce_db2<br/>product_descriptions)]
   end
 
   subgraph Airflow
-    D[ecommerce_dw_etl DAG\n(create_dw_schema → dims → fx → fact)]
+    D[ecommerce_dw_etl DAG<br/>(create_dw_schema → dims → fx → fact)]
   end
 
   subgraph DW[Postgres: data_warehouse]
@@ -359,6 +357,8 @@ flowchart LR
   J --> K
   J --> L --> M --> N
   N -->|SQL queries| O[[Analytics/Reports]]
+
+
 
 Troubleshooting
 - Airflow imports fail in tests
