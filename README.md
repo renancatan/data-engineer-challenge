@@ -327,29 +327,20 @@ docker exec -it airflow_scheduler airflow tasks test \
 
 If invalid ISO currency codes are present (e.g., 55 rows), this task will exit non-zero (by design).
 
+
 flowchart LR
   subgraph Sources
     A[(Postgres: ecommerce_db1<br/>customers/orders/order_items)]
     B[(Postgres: ecommerce_db2<br/>product_descriptions)]
   end
-
   subgraph Airflow
     D[ecommerce_dw_etl DAG<br/>(create_dw_schema → dims → fx → fact)]
   end
-
   subgraph DW[Postgres: data_warehouse]
-    E[(dw.dim_customer)]
-    F[(dw.dim_product)]
-    G[(dw.dim_date)]
-    H[(dw.dim_time)]
-    I[(dw.dim_fx_rate)]
-    J[(dw.fact_sales_item)]
-    K[(dw.mv_hourly_sales)]
-    L[[dw.vw_sales_base]]
-    M[[dw.vw_sales_enriched]]
-    N[[dw.vw_sales_clean]]
+    E[(dw.dim_customer)] F[(dw.dim_product)] G[(dw.dim_date)] H[(dw.dim_time)]
+    I[(dw.dim_fx_rate)] J[(dw.fact_sales_item)] K[(dw.mv_hourly_sales)]
+    L[[dw.vw_sales_base]] M[[dw.vw_sales_enriched]] N[[dw.vw_sales_clean]]
   end
-
   A -->|orders & items| D
   B -->|product catalog| D
   D -->|upserts| E & F & I & J
