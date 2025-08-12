@@ -89,7 +89,9 @@ services:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
-
+    networks:
+      - data_pipeline
+      
   airflow-webserver:
     image: de-challenge-airflow:latest
     container_name: airflow_webserver
